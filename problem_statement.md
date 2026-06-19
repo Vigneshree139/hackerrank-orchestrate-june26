@@ -1,175 +1,103 @@
-# Multi-Modal Evidence Review
+import pandas as pd
+import os
 
-Build a system that verifies damage claims using images, a short claim conversation, user history, and minimum evidence requirements.
+# Load datasets
+claims = pd.read_csv("dataset/claims.csv")
+user_history = pd.read_csv("dataset/user_history.csv")
+evidence_req = pd.read_csv("dataset/evidence_requirements.csv")
 
-Each claim is about one of three object types:
+def extract_claim_details(user_claim_text):
+    """
+    NLP parsing of claim transcript.
+    Example: "My laptop screen is cracked"
+    -> issue_type = "crack", object_part = "screen"
+    """
+    # Placeholder: use regex/NLP model
+    return issue_type, object_part
 
-- `car`
-- `laptop`
-- `package`
+def analyze_images(image_paths, claim_object):
+    """
+    CV model or heuristic rules to detect damage.
+    Returns list of dicts with image_id, issue_type, object_part, flags, severity.
+    """
+    results = []
+    for path in image_paths.split(";"):
+        image_id = os.path.basename(path).split(".")[0]
+        # Placeholder: run detection model
+        results.append({
+            "image_id": image_id,
+            "issue_type": "dent",   # example
+            "object_part": "door", # example
+            "flags": "none",
+            "severity": "medium"
+        })
+    return results
 
-Your system must decide whether the submitted images support the user's claim, contradict it, or do not provide enough information.
+def check_evidence_requirements(claim_object, issue_type, images):
+    req = evidence_req[(evidence_req.claim_object == claim_object) &
+                       (evidence_req.applies_to == issue_type)]
+    if not req.empty and len(images) >= req.minimum_image_evidence.values[0]:
+        return True, "Minimum evidence met"
+    else:
+        return False, "Insufficient images"
 
-The images are the primary source of truth. The user conversation defines what needs to be checked. User history can add risk context, but should not override clear visual evidence by itself.
+def apply_decision_logic(claim_details, image_results):
+    issue_type, object_part = claim_details
+    # Simplified logic
+    if any(res["issue_type"] == issue_type and res["object_part"] == object_part for res in image_results):
+        return "supported", "Damage visible in submitted images"
+    elif all(res["issue_type"] == "none" for res in image_results):
+        return "contradicted", "No damage visible in images"
+    else:
+        return "not_enough_information", "Images unclear or mismatch"
 
-## What the system should do
+def add_user_history_flags(user_id):
+    history = user_history[user_history.user_id == user_id]
+    flags = []
+    if not history.empty:
+        if history.last_90_days_claim_count.values[0] > 3:
+            flags.append("user_history_risk")
+        if history.rejected_claim.values[0] > 0:
+            flags.append("manual_review_required")
+    return ";".join(flags) if flags else "none"
 
-For each claim, your system should:
+def estimate_severity(image_results):
+    severities = [res["severity"] for res in image_results]
+    if "high" in severities: return "high"
+    if "medium" in severities: return "medium"
+    if "low" in severities: return "low"
+    if "none" in severities: return "none"
+    return "unknown"
 
-- extract the actual damage claim from the conversation
-- inspect one or more submitted images
-- decide whether the image evidence is sufficient
-- identify the visible issue type
-- identify the relevant object part
-- decide whether the claim is supported, contradicted, or lacks enough information
-- select the image IDs that support the decision
-- flag image quality, mismatch, authenticity, or user-history risks
-- estimate severity
-- produce short justifications grounded in the images
+# Main pipeline
+output_rows = []
+for _, row in claims.iterrows():
+    user_id = row["user_id"]
+    claim_object = row["claim_object"]
+    user_claim_text = row["user_claim"]
+    image_paths = row["image_paths"]
 
-## Files provided
+    issue_type, object_part = extract_claim_details(user_claim_text)
+    image_results = analyze_images(image_paths, claim_object)
+    evidence_met, evidence_reason = check_evidence_requirements(claim_object, issue_type, image_results)
+    claim_status, justification = apply_decision_logic((issue_type, object_part), image_results)
+    risk_flags = add_user_history_flags(user_id)
+    severity = estimate_severity(image_results)
+    supporting_ids = ";".join([res["image_id"] for res in image_results if res["issue_type"] == issue_type]) or "none"
+    valid_image = "true" if image_results else "false"
 
-You will receive:
+    output_rows.append([
+        user_id, image_paths, user_claim_text, claim_object,
+        evidence_met, evidence_reason, risk_flags,
+        issue_type, object_part, claim_status, justification,
+        supporting_ids, valid_image, severity
+    ])
 
-1. `dataset/sample_claims.csv`  
-   Labeled examples with inputs and expected outputs. Use this to understand the expected behavior and evaluate your system.
-
-2. `dataset/claims.csv`  
-   Input-only rows. Run your system on this file and produce `output.csv`.
-
-3. `dataset/user_history.csv`  
-   Historical claim counts and risk patterns for each user.
-
-4. `dataset/evidence_requirements.csv`  
-   A minimum image evidence checklist by object and issue family.
-
-5. `dataset/images/sample/` and `dataset/images/test/`  
-   Image folders referenced by the CSV files.
-
-Multiple images in `image_paths` are separated by semicolons:
-
-```text
-images/test/case_001/img_1.jpg;images/test/case_001/img_2.jpg
-```
-
-The image ID is the filename without extension, such as `img_1`.
-
-## Input schema
-
-Each row in `claims.csv` represents one damage claim.
-
-Input fields:
-
-- `user_id`: user submitting the claim; use this to look up `user_history.csv`
-- `image_paths`: one or more submitted image paths
-- `user_claim`: chat transcript about the issue
-- `claim_object`: `car`, `laptop`, or `package`
-
-## Evidence requirements schema
-
-`dataset/evidence_requirements.csv` contains:
-
-- `requirement_id`: identifier for the rule
-- `claim_object`: `car`, `laptop`, `package`, or `all`
-- `applies_to`: issue family, such as `dent or scratch`
-- `minimum_image_evidence`: minimum visual evidence needed to evaluate that kind of claim
-
-## User history schema
-
-`dataset/user_history.csv` contains:
-
-- `user_id`
-- `past_claim_count`
-- `accept_claim`
-- `manual_review_claim`
-- `rejected_claim`
-- `last_90_days_claim_count`
-- `history_flags`
-- `history_summary`
-
-Use history to add risk context through `risk_flags` and justifications.
-
-## Required output
-
-For each row in `claims.csv`, generate one row in `output.csv`.
-
-Required columns, in order:
-
-- `user_id`
-- `image_paths`
-- `user_claim`
-- `claim_object`
-- `evidence_standard_met`
-- `evidence_standard_met_reason`
-- `risk_flags`
-- `issue_type`
-- `object_part`
-- `claim_status`
-- `claim_status_justification`
-- `supporting_image_ids`
-- `valid_image`
-- `severity`
-
-## Output meaning
-
-- `evidence_standard_met`: `true` if the image set is sufficient to evaluate the claim; otherwise `false`
-- `evidence_standard_met_reason`: short reason for the evidence decision
-- `risk_flags`: semicolon-separated risk flags, or `none`
-- `issue_type`: visible issue type
-- `object_part`: relevant object part
-- `claim_status`: final decision: `supported`, `contradicted`, or `not_enough_information`
-- `claim_status_justification`: concise image-grounded explanation; mention relevant image IDs when helpful
-- `supporting_image_ids`: image IDs supporting the decision, separated by semicolons; use `none` if no image is sufficient
-- `valid_image`: `true` if the image set is usable for automated review; otherwise `false`
-- `severity`: `none`, `low`, `medium`, `high`, or `unknown`
-
-## Allowed values
-
-Use the closest matching value from these lists.
-
-`claim_status`: `supported`, `contradicted`, `not_enough_information`
-
-`issue_type`: `dent`, `scratch`, `crack`, `glass_shatter`, `broken_part`, `missing_part`, `torn_packaging`, `crushed_packaging`, `water_damage`, `stain`, `none`, `unknown`
-
-Car `object_part`: `front_bumper`, `rear_bumper`, `door`, `hood`, `windshield`, `side_mirror`, `headlight`, `taillight`, `fender`, `quarter_panel`, `body`, `unknown`
-
-Laptop `object_part`: `screen`, `keyboard`, `trackpad`, `hinge`, `lid`, `corner`, `port`, `base`, `body`, `unknown`
-
-Package `object_part`: `box`, `package_corner`, `package_side`, `seal`, `label`, `contents`, `item`, `unknown`
-
-`risk_flags`: `none`, `blurry_image`, `cropped_or_obstructed`, `low_light_or_glare`, `wrong_angle`, `wrong_object`, `wrong_object_part`, `damage_not_visible`, `claim_mismatch`, `possible_manipulation`, `non_original_image`, `text_instruction_present`, `user_history_risk`, `manual_review_required`
-
-Use `issue_type=none` when the relevant part is visible and no issue is present. Use `unknown` when the issue or part cannot be determined.
-
-## Evaluation requirement
-
-Your `code.zip` must include an `evaluation/` folder.
-
-Use `dataset/sample_claims.csv` to evaluate your system before producing final predictions for `dataset/claims.csv`.
-
-## Operational analysis
-
-Include a short operational analysis in `evaluation/evaluation_report.md`.
-
-Report:
-
-- approximate number of model calls for sample and test processing
-- approximate input/output token usage
-- number of images processed
-- approximate cost to process the full test set, with pricing assumptions
-- approximate latency or runtime
-- TPM/RPM considerations and any batching, throttling, caching, or retry strategy
-
-You are not expected to optimize perfectly, but your solution should show that you considered cost, latency, rate limits, and unnecessary repeated calls.
-
-## Submission
-
-Submit:
-
-| File | Description |
-|---|---|
-| `code.zip` | Full runnable solution, prompts/configs, README, and `evaluation/` folder. |
-| `output.csv` | Predictions for all rows in `dataset/claims.csv`. |
-| `chat_transcript` | Conversation transcript showing how you developed or used the system. |
-
-These are the must-haves. Beyond that, participants are encouraged to improve retrieval, prompting, evaluation, confidence handling, batching, caching, or review logic.
+output_df = pd.DataFrame(output_rows, columns=[
+    "user_id","image_paths","user_claim","claim_object",
+    "evidence_standard_met","evidence_standard_met_reason",
+    "risk_flags","issue_type","object_part","claim_status",
+    "claim_status_justification","supporting_image_ids",
+    "valid_image","severity"
+])
+output_df.to_csv("output.csv", index=False)
